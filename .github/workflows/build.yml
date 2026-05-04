@@ -1,0 +1,121 @@
+name: Build Fog Kernel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential bc bison flex \
+            libssl-dev libelf-dev git curl \
+            zip python3 clang lld
+
+      - name: Build kernel
+        run: |
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export KBUILD_BUILD_USER=nobody
+          export KBUILD_BUILD_HOST=android-build
+
+          # Use system clang (stable)
+          export CC=clang
+          export LLVM=1
+          export LLVM_IAS=1
+
+          mkdir -p out
+
+          # Load correct config
+          make O=out vendor/fog-perf_defconfig
+
+          # Enable your features SAFELY
+          scripts/config --file out/.config \
+            -e PID_NS \
+            -e USER_NS \
+            -e IPC_NS \
+            -e CGROUP_PIDS \
+            -e CGROUP_DEVICE \
+            -e CGROUP_PERF \
+            -e OVERLAY_FS \
+            -e SQUASHFS \
+            -e SQUASHFS_XZ \
+            -e FUSE_FS \
+            -e VETH \
+            -e TUN \
+            -e WIREGUARD \
+            -e NF_TABLES \
+            -e IP_NF_NAT \
+            -e CHECKPOINT_RESTORE \
+            -e POSIX_MQUEUE \
+            -e DEVPTS_MULTIPLE_INSTANCES
+
+          # Finalize config
+          make O=out olddefconfig
+
+          # Build everything needed
+          make -j$(nproc) O=out \
+            Image.gz dtb.img dtbo.img 2>&1 | tee build.log
+
+      - name: Package kernel
+        run: |
+          if [ ! -f out/arch/arm64/boot/Image.gz ]; then
+            echo "Kernel image not found!"
+            tail -50 build.log
+            exit 1
+          fi
+
+          git clone --depth=1 https://github.com/CHRISL7/AnyKernel3 AnyKernel3
+
+          cp out/arch/arm64/boot/Image.gz AnyKernel3/
+          cp out/arch/arm64/boot/dtb.img AnyKernel3/ 2>/dev/null || true
+          cp out/arch/arm64/boot/dtbo.img AnyKernel3/ 2>/dev/null || true
+
+          cat > AnyKernel3/anykernel.sh << 'EOF'
+          ### AnyKernel3 Ramdisk Mod Script
+          
+          properties() { '
+          kernel.string=Fog Custom Kernel (Namespace Enabled)
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=fog
+          device.name2=wind
+          device.name3=rain
+          '; }
+          
+          block=/dev/block/bootdevice/by-name/boot;
+          is_slot_device=0;
+          ramdisk_compression=auto;
+          
+          . tools/ak3-core.sh;
+          split_boot;
+          flash_boot;
+          EOF
+
+          cd AnyKernel3
+          zip -r9 ../Fog-Namespace-Kernel.zip * \
+            --exclude=".git/*" --exclude="*.zip"
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+
+      - name: Upload kernel zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: Fog-Namespace-Kernel
+          path: Fog-Namespace-Kernel.zip
+          retention-days: 7
